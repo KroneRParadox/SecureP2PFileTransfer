@@ -17,6 +17,8 @@
 
 #include <iostream>
 #include <fstream>
+#include <algorithm>
+#include <cctype>
 #include <vector>
 #include <string>
 #include <limits>
@@ -55,6 +57,26 @@ void writeFile(const string& path, const ByteVec& v) {
 // Print connection status to console
 void showConnectionStatus() {
     cout << (isConnected ? "[Connected]\n" : "[Disconnected]\n");
+}
+
+// Trim whitespace from both ends of a std::string (in place)
+static void trim(std::string& s) {
+    // predicate: returns true if c is *not* whitespace
+    auto not_space = [](unsigned char c) {
+        return !std::isspace(c);
+        };
+
+    // trim left:
+    s.erase(
+        s.begin(),
+        std::find_if(s.begin(), s.end(), not_space)
+    );
+
+    // trim right:
+    s.erase(
+        std::find_if(s.rbegin(), s.rend(), not_space).base(),
+        s.end()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,15 +227,31 @@ void hostListen() {
     }
     cout << "Client connected\n";
 
-    // receive client's public key
-    uint32_t netL; recv(connSock, (char*)&netL, sizeof(netL), MSG_WAITALL);
-    uint32_t L = ntohl(netL);
-    ByteVec blob(L);
-    recv(connSock, (char*)blob.data(), L, MSG_WAITALL);
+    // 1) Receive client's public key
+    uint32_t netLen;
+    recv(connSock, (char*)&netLen, sizeof(netLen), MSG_WAITALL);
+    uint32_t len = ntohl(netLen);
+    ByteVec clientBlob(len);
+    recv(connSock, (char*)clientBlob.data(), len, MSG_WAITALL);
 
-    ByteQueue q; q.Put(blob.data(), blob.size()); q.MessageEnd();
-    peerPub.BERDecode(q);
+    ByteQueue q1;
+    q1.Put(clientBlob.data(), clientBlob.size());
+    q1.MessageEnd();
+    peerPub.BERDecode(q1);
     cout << "Handshake: received client pubkey\n";
+
+    // 2) Send server's public key
+    RSA::PublicKey serverPub = loadPub();
+    ByteQueue q2;
+    serverPub.DEREncode(q2);
+    size_t sz = q2.CurrentSize();
+    ByteVec serverBlob(sz);
+    q2.Get(serverBlob.data(), serverBlob.size());
+
+    uint32_t netSz = htonl((uint32_t)sz);
+    send(connSock, (char*)&netSz, sizeof(netSz), 0);
+    send(connSock, (char*)serverBlob.data(), serverBlob.size(), 0);
+    cout << "Handshake: sent server pubkey\n";
 
     isConnected = true;
 }
@@ -242,17 +280,31 @@ void doConnect() {
     connSock = s;
     cout << "Connected to server\n";
 
-    // send our public key
-    RSA::PublicKey pub = loadPub();
-    ByteQueue q; pub.DEREncode(q);
-    size_t N = q.CurrentSize();
-    ByteVec blob(N);
-    q.Get(blob.data(), blob.size());
+    // 1) Send client's public key
+    RSA::PublicKey clientPub = loadPub();
+    ByteQueue q1;
+    clientPub.DEREncode(q1);
+    size_t sz = q1.CurrentSize();
+    ByteVec blob(sz);
+    q1.Get(blob.data(), blob.size());
 
-    uint32_t netN = htonl((uint32_t)N);
-    send(connSock, (char*)&netN, sizeof(netN), 0);
+    uint32_t netSz = htonl((uint32_t)sz);
+    send(connSock, (char*)&netSz, sizeof(netSz), 0);
     send(connSock, (char*)blob.data(), blob.size(), 0);
     cout << "Handshake: sent client pubkey\n";
+
+    // 2) Receive server's public key
+    uint32_t netLen;
+    recv(connSock, (char*)&netLen, sizeof(netLen), MSG_WAITALL);
+    uint32_t len = ntohl(netLen);
+    ByteVec serverBlob(len);
+    recv(connSock, (char*)serverBlob.data(), len, MSG_WAITALL);
+
+    ByteQueue q2;
+    q2.Put(serverBlob.data(), serverBlob.size());
+    q2.MessageEnd();
+    peerPub.BERDecode(q2);
+    cout << "Handshake: received server pubkey\n";
 
     isConnected = true;
 }
