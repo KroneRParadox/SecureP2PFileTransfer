@@ -25,37 +25,43 @@ using namespace std;
 using namespace CryptoPP;
 using ByteVec = vector<byte>;
 
+// Default listening/connecting port and key file paths
 static const uint16_t DEFAULT_PORT = 12345;
 static const char* PUBKEY_FILE = "public.key";
 static const char* PRIVKEY_FILE = "private.key";
 
+// Global socket and connection state
 SOCKET        connSock = INVALID_SOCKET;
 bool          isConnected = false;
-RSA::PublicKey peerPub;    // populated by handshake
+RSA::PublicKey peerPub;    // Will hold the peer's RSA public key from handshake
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Helpers: file IO and connection status display
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Read entire binary file into ByteVec
 ByteVec readFile(const string& path) {
     ifstream in(path, ios::binary);
     if (!in) throw runtime_error("Cannot open: " + path);
     return ByteVec(istreambuf_iterator<char>(in), {});
 }
 
+// Write ByteVec content out to binary file
 void writeFile(const string& path, const ByteVec& v) {
     ofstream out(path, ios::binary);
     out.write((char*)v.data(), v.size());
 }
 
+// Print connection status to console
 void showConnectionStatus() {
     cout << (isConnected ? "[Connected]\n" : "[Disconnected]\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Crypto functions
+// Crypto functions: RSA keygen, load, encrypt/decrypt, AES-GCM encrypt/decrypt
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Generate RSA key pair and write to files
 void genRSAKeys() {
     AutoSeededRandomPool rng;
     InvertibleRSAFunction params;
@@ -75,18 +81,21 @@ void genRSAKeys() {
         << "  Private: " << PRIVKEY_FILE << "\n";
 }
 
+// Load public key from file
 RSA::PublicKey loadPub(const string& fn = PUBKEY_FILE) {
     FileSource fs(fn.c_str(), true);
     RSA::PublicKey pub; pub.BERDecode(fs);
     return pub;
 }
 
+// Load private key from file
 RSA::PrivateKey loadPriv() {
     FileSource fs(PRIVKEY_FILE, true);
     RSA::PrivateKey priv; priv.BERDecode(fs);
     return priv;
 }
 
+// RSA-OAEP encrypt
 ByteVec rsaEncrypt(const RSA::PublicKey& K, const ByteVec& pt) {
     AutoSeededRandomPool rng;
     RSAES<OAEP<SHA256>>::Encryptor enc(K);
@@ -98,6 +107,7 @@ ByteVec rsaEncrypt(const RSA::PublicKey& K, const ByteVec& pt) {
     return ct;
 }
 
+// RSA-OAEP decrypt
 ByteVec rsaDecrypt(const RSA::PrivateKey& K, const ByteVec& ct) {
     AutoSeededRandomPool rng;
     RSAES<OAEP<SHA256>>::Decryptor dec(K);
@@ -109,6 +119,7 @@ ByteVec rsaDecrypt(const RSA::PrivateKey& K, const ByteVec& ct) {
     return pt;
 }
 
+// AES-GCM encrypt
 ByteVec aesGcmEncrypt(const ByteVec& key, const ByteVec& iv, const ByteVec& pt) {
     GCM<AES>::Encryption e;
     e.SetKeyWithIV(key.data(), key.size(), iv.data(), iv.size());
@@ -125,6 +136,7 @@ ByteVec aesGcmEncrypt(const ByteVec& key, const ByteVec& iv, const ByteVec& pt) 
     return ct;
 }
 
+// AES-GCM decrypt & verify
 ByteVec aesGcmDecrypt(const ByteVec& key, const ByteVec& iv, const ByteVec& ct) {
     GCM<AES>::Decryption d;
     d.SetKeyWithIV(key.data(), key.size(), iv.data(), iv.size());
@@ -142,22 +154,22 @@ ByteVec aesGcmDecrypt(const ByteVec& key, const ByteVec& iv, const ByteVec& ct) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Network management
+// Network management: disconnect cleanly
 // ─────────────────────────────────────────────────────────────────────────────
 
 void disconnectPeer() {
     if (isConnected) {
         closesocket(connSock);
-        WSACleanup();
         isConnected = false;
         cout << "→ Disconnected\n";
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Peer-side handshake only + file exchange
+// Peer handshake & file-exchange routines
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Host: wait, handshake (recv client's pubkey)
 void hostListen() {
     if (isConnected) {
         cout << "Already connected\n";
@@ -165,19 +177,15 @@ void hostListen() {
     }
 
     SOCKET listenFd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenFd == INVALID_SOCKET) {
-        cerr << "socket() failed: " << WSAGetLastError() << "\n";
-        return;
-    }
     BOOL opt = TRUE;
     setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(DEFAULT_PORT);
+    sockaddr_in srv{};
+    srv.sin_family = AF_INET;
+    srv.sin_addr.s_addr = INADDR_ANY;
+    srv.sin_port = htons(DEFAULT_PORT);
 
-    if (::bind(listenFd, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+    if (::bind(listenFd, (sockaddr*)&srv, sizeof(srv)) == SOCKET_ERROR) {
         cerr << "bind() failed: " << WSAGetLastError() << "\n";
         closesocket(listenFd);
         return;
@@ -197,22 +205,20 @@ void hostListen() {
     }
     cout << "Client connected\n";
 
-    // *** Handshake: receive client's public key ***
-    uint32_t netL;
-    recv(connSock, (char*)&netL, sizeof(netL), MSG_WAITALL);
+    // receive client's public key
+    uint32_t netL; recv(connSock, (char*)&netL, sizeof(netL), MSG_WAITALL);
     uint32_t L = ntohl(netL);
     ByteVec blob(L);
     recv(connSock, (char*)blob.data(), L, MSG_WAITALL);
 
-    ByteQueue q;
-    q.Put(blob.data(), blob.size());
-    q.MessageEnd();
+    ByteQueue q; q.Put(blob.data(), blob.size()); q.MessageEnd();
     peerPub.BERDecode(q);
     cout << "Handshake: received client pubkey\n";
 
     isConnected = true;
 }
 
+// Client: connect + handshake (send our pubkey)
 void doConnect() {
     if (isConnected) {
         cout << "Already connected\n";
@@ -223,16 +229,12 @@ void doConnect() {
     string ip; cin >> ip;
 
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) {
-        cerr << "socket() failed: " << WSAGetLastError() << "\n";
-        return;
-    }
-    sockaddr_in serv{};
-    serv.sin_family = AF_INET;
-    serv.sin_port = htons(DEFAULT_PORT);
-    inet_pton(AF_INET, ip.c_str(), &serv.sin_addr);
+    sockaddr_in srv{};
+    srv.sin_family = AF_INET;
+    srv.sin_port = htons(DEFAULT_PORT);
+    inet_pton(AF_INET, ip.c_str(), &srv.sin_addr);
 
-    if (::connect(s, (sockaddr*)&serv, sizeof(serv)) != 0) {
+    if (::connect(s, (sockaddr*)&srv, sizeof(srv)) != 0) {
         cerr << "connect() failed: " << WSAGetLastError() << "\n";
         closesocket(s);
         return;
@@ -240,10 +242,9 @@ void doConnect() {
     connSock = s;
     cout << "Connected to server\n";
 
-    // *** Handshake: send our public key ***
+    // send our public key
     RSA::PublicKey pub = loadPub();
-    ByteQueue q;
-    pub.DEREncode(q);
+    ByteQueue q; pub.DEREncode(q);
     size_t N = q.CurrentSize();
     ByteVec blob(N);
     q.Get(blob.data(), blob.size());
@@ -256,6 +257,7 @@ void doConnect() {
     isConnected = true;
 }
 
+// Send a file under AES-GCM, key+IV wrapped by RSA
 void sendEncryptedFile() {
     if (!isConnected) { cout << "Not connected\n"; return; }
 
@@ -283,18 +285,17 @@ void sendEncryptedFile() {
     sendB(ckey);
     sendB(cfile);
 
-    cout << "Sent key(" << ckey.size() << " B) + file("
-        << cfile.size() << " B)\n";
+    cout << "Sent key(" << ckey.size() << " B) + file(" << cfile.size() << " B)\n";
 }
 
+// Receive RSA-wrapped AES key+IV, then AES-GCM file
 void receiveEncryptedFile() {
     if (!isConnected) { cout << "Not connected\n"; return; }
 
     RSA::PrivateKey priv = loadPriv();
 
     auto recvB = [&](ByteVec& b) {
-        uint32_t netL;
-        recv(connSock, (char*)&netL, sizeof(netL), MSG_WAITALL);
+        uint32_t netL; recv(connSock, (char*)&netL, sizeof(netL), MSG_WAITALL);
         uint32_t L = ntohl(netL);
         b.resize(L);
         recv(connSock, (char*)b.data(), L, MSG_WAITALL);
@@ -336,7 +337,7 @@ void receiveEncryptedFile() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Submenus & Main
+// Menus
 // ─────────────────────────────────────────────────────────────────────────────
 
 void localCryptoMenu() {
@@ -351,6 +352,7 @@ void localCryptoMenu() {
             "0) Back\n"
             "Choice: ";
         cin >> c; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
         try {
             switch (c) {
             case 1: {
@@ -413,6 +415,24 @@ void localCryptoMenu() {
 void networkMenu() {
     int c;
     do {
+        // ─── Peek to detect a remote, orderly shutdown ────────────────────
+        if (isConnected) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(connSock, &readfds);
+            TIMEVAL tv = { 0, 0 };
+            int sel = select(0, &readfds, nullptr, nullptr, &tv);
+            if (sel > 0 && FD_ISSET(connSock, &readfds)) {
+                char buf;
+                int r = ::recv(connSock, &buf, 1, MSG_PEEK);
+                if (r == 0) {
+                    cout << "→ Peer disconnected\n";
+                    closesocket(connSock);
+                    isConnected = false;
+                }
+            }
+        }
+
         showConnectionStatus();
         cout << "\n=== Peer Network ===\n";
         if (!isConnected) {
@@ -429,6 +449,7 @@ void networkMenu() {
                 "Choice: ";
         }
         cin >> c; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
         try {
             if (!isConnected) {
                 if (c == 1) hostListen();
@@ -455,7 +476,7 @@ int main() {
         return 1;
     }
 
-    // Auto-generate if missing
+    // Auto-generate RSA keys if missing
     if (!ifstream(PRIVKEY_FILE)) {
         genRSAKeys();
     }
@@ -479,5 +500,6 @@ int main() {
         }
     } while (choice != 0);
 
+    WSACleanup();
     return 0;
 }
