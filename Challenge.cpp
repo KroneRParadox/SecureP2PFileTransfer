@@ -17,8 +17,6 @@
 
 #include <iostream>
 #include <fstream>
-#include <algorithm>
-#include <cctype>
 #include <vector>
 #include <string>
 #include <limits>
@@ -59,25 +57,6 @@ void showConnectionStatus() {
     cout << (isConnected ? "[Connected]\n" : "[Disconnected]\n");
 }
 
-// Trim whitespace from both ends of a std::string (in place)
-static void trim(std::string& s) {
-    // predicate: returns true if c is *not* whitespace
-    auto not_space = [](unsigned char c) {
-        return !std::isspace(c);
-        };
-
-    // trim left:
-    s.erase(
-        s.begin(),
-        std::find_if(s.begin(), s.end(), not_space)
-    );
-
-    // trim right:
-    s.erase(
-        std::find_if(s.rbegin(), s.rend(), not_space).base(),
-        s.end()
-    );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Crypto functions: RSA keygen, load, encrypt/decrypt, AES-GCM encrypt/decrypt
